@@ -83,7 +83,7 @@ print("Ray tracing finished.")
 # 3) PATH LOSS PER RECEIVER  (using CIR)
 # ------------------------------------------------------------
 def path_loss_per_rx(paths):
-    # a: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time_steps] [web:2]
+    # a: [num_rx, num_rx_ant, num_tx, num_tx_ant, num_paths, num_time_steps]
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
     power_rx = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5))  # sum over all but rx
     pl_db = -10.0 * np.log10(power_rx + 1e-15)
@@ -117,7 +117,7 @@ def pdp_for_rx(paths, rx_index=0):
 
     p = np.abs(a_rx) ** 2
 
-    # Keep only valid paths: delay >= 0 and power > 0
+    # Keeping only valid paths: delay >= 0 and power > 0
     mask = (tau_rx >= 0.0) & (p > 0.0)
     tau_rx = tau_rx[mask]
     p = p[mask]
