@@ -1,5 +1,5 @@
 # python
-# Compatibility shim for Sionna imports — paste into `Sionna_Code_2.py`
+# Compatibility shim for Sionna imports — paste into `Sionna_Code.py`
 
 import importlib
 import tensorflow as tf
