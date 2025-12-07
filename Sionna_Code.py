@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
-import sionna_vispy  # registers VisPy as preview backend
+import sionna_vispy
 import mitsuba as mi
 
 from sionna.rt import (
@@ -14,9 +14,6 @@ from sionna.rt import (
     cpx_abs_square,
 )
 
-# ------------------------------------------------------------
-# Helper: filter weak rays for visualization
-# ------------------------------------------------------------
 def filter_strong_paths(paths, threshold_db=-90.0):
     """
     Keep only strong paths for visualization.
@@ -38,22 +35,15 @@ def filter_strong_paths(paths, threshold_db=-90.0):
     power_db = 10.0 * np.log10(power + 1e-30)
     keep = power_db > threshold_db        # [num_rx,num_tx,num_paths]
 
-    # Combine with internal validity mask (recommended workaround)
     paths._valid = tf.logical_and(paths.valid, keep)
     return paths
 
-# ------------------------------------------------------------
-# 0) LOAD SCENE
-# ------------------------------------------------------------
 scene_path = "Areas/Pankow/Pankow.xml"
 scene = load_scene(scene_path)
 print("Scene loaded successfully.")
 print("Objects:", len(scene.objects))
 print("Materials:", len(scene.radio_materials))
 
-# ------------------------------------------------------------
-# Geometry-based bounds from Mitsuba meshes
-# ------------------------------------------------------------
 def scene_bounds(scene):
     """Return overall [xmin,xmax], [ymin,ymax], [zmin,zmax] of all meshes."""
     shapes = scene._scene.shapes()   # low-level Mitsuba scene [web:18]
@@ -93,9 +83,6 @@ print("Scene bounds:", mins, maxs)
 X_BUILD_MIN, X_BUILD_MAX = building_x_bounds(scene, height_thresh=5.0)
 print("Building X-range:", X_BUILD_MIN, X_BUILD_MAX)
 
-# ------------------------------------------------------------
-# 1) ADD TX + RXs (clamped to building corridor)
-# ------------------------------------------------------------
 def clamp_to_bounds(pos, mins, maxs, margin=1.0):
     x, y, z = pos
     x = float(np.clip(x, mins[0] + margin, maxs[0] - margin))
@@ -143,14 +130,11 @@ scene.tx_array = PlanarArray(
 )
 scene.rx_array = scene.tx_array
 
-# Optional 3D preview of scene + devices (no rays yet)
+#3D preview of scene + devices (no rays yet)
 scene.preview(show_devices=True)
 
 p_solver = PathSolver()
 
-# ------------------------------------------------------------
-# 2) RUN SIONNA RT AT 3.5 & 28 GHz  + visualize rays
-# ------------------------------------------------------------
 frequencies = [3.5e9, 28e9]
 results = {}
 
@@ -170,7 +154,7 @@ for f in frequencies:
     )
     results[f] = paths
 
-    # Interactive preview (if backend works)
+    # Interactive preview of rays
     scene.preview(
         paths=paths,
         show_devices=True,
@@ -197,9 +181,6 @@ for f in frequencies:
 
 print("Ray tracing finished.")
 
-# ------------------------------------------------------------
-# 3) PATH LOSS PER RECEIVER  (using CIR)
-# ------------------------------------------------------------
 def path_loss_per_rx(paths):
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
     power_rx = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5))
@@ -222,9 +203,6 @@ def plot_path_loss(freq, paths):
 for f in frequencies:
     plot_path_loss(f, results[f])
 
-# ------------------------------------------------------------
-# 4) PDP & RMS DELAY SPREAD FOR ONE RX
-# ------------------------------------------------------------
 def pdp_for_rx(paths, rx_index=0):
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
     a_rx = a[rx_index, 0, 0, 0, :, 0]
