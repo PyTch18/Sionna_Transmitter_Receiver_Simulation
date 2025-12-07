@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tensorflow as tf
 import sionna_vispy  # registers VisPy as preview backend
-import mitsuba as mi
 
 from sionna.rt import (
     load_scene,
@@ -10,13 +9,9 @@ from sionna.rt import (
     Receiver,
     PlanarArray,
     PathSolver,
-    Camera,
-    cpx_abs_square,
+    Camera, cpx_abs_square,  # for static renders
 )
 
-# ------------------------------------------------------------
-# Helper: filter weak rays for visualization
-# ------------------------------------------------------------
 def filter_strong_paths(paths, threshold_db=-90.0):
     """
     Keep only strong paths for visualization.
@@ -33,12 +28,12 @@ def filter_strong_paths(paths, threshold_db=-90.0):
         axes = tuple(range(3, nd))
         power = tf.reduce_sum(a_amp, axis=axes)
 
-    print("power shape:", power.shape, "valid shape:", paths.valid.shape)
+    print("power shape:", power.shape, "valid shape:", paths.valid.shape)  # debug once
 
     power_db = 10.0 * np.log10(power + 1e-30)
-    keep = power_db > threshold_db        # [num_rx,num_tx,num_paths]
+    keep = power_db > threshold_db        # same shape as [num_rx,num_tx,num_paths]
 
-    # Combine with internal validity mask (recommended workaround)
+    # Combine with internal validity mask (recommended workaround) [web:235]
     paths._valid = tf.logical_and(paths.valid, keep)
     return paths
 
@@ -46,88 +41,30 @@ def filter_strong_paths(paths, threshold_db=-90.0):
 # 0) LOAD SCENE
 # ------------------------------------------------------------
 scene_path = "Areas/Pankow/Pankow.xml"
+# scene_path = "Areas/Uni/Uni.xml"
+
 scene = load_scene(scene_path)
 print("Scene loaded successfully.")
 print("Objects:", len(scene.objects))
 print("Materials:", len(scene.radio_materials))
 
 # ------------------------------------------------------------
-# Geometry-based bounds from Mitsuba meshes
+# 1) ADD TX + RXs
 # ------------------------------------------------------------
-def scene_bounds(scene):
-    """Return overall [xmin,xmax], [ymin,ymax], [zmin,zmax] of all meshes."""
-    shapes = scene._scene.shapes()   # low-level Mitsuba scene [web:18]
-    mins = []
-    maxs = []
-    for s in shapes:
-        if isinstance(s, mi.Mesh):
-            bb = s.bbox()           # bounding box [web:454]
-            mins.append(np.array([bb.min.x, bb.min.y, bb.min.z], float))
-            maxs.append(np.array([bb.max.x, bb.max.y, bb.max.z], float))
-    mins = np.vstack(mins).min(axis=0)
-    maxs = np.vstack(maxs).max(axis=0)
-    return mins, maxs
-
-def building_x_bounds(scene, height_thresh=5.0):
-    """
-    Approximate X-range of buildings, ignoring flat ground plane.
-    """
-    xs = []
-    for s in scene._scene.shapes():
-        if not isinstance(s, mi.Mesh):
-            continue
-        bb = s.bbox()
-        h = bb.max.z - bb.min.z
-        if h >= height_thresh:   # tall => building, not just ground
-            xs.append(bb.min.x)
-            xs.append(bb.max.x)
-    if not xs:
-        raise RuntimeError("No building meshes found; try lowering height_thresh.")
-    return float(min(xs)), float(max(xs))
-
-mins, maxs = scene_bounds(scene)
-X_MIN, Y_MIN, Z_MIN = mins
-X_MAX, Y_MAX, Z_MAX = maxs
-print("Scene bounds:", mins, maxs)
-
-X_BUILD_MIN, X_BUILD_MAX = building_x_bounds(scene, height_thresh=5.0)
-print("Building X-range:", X_BUILD_MIN, X_BUILD_MAX)
-
-# ------------------------------------------------------------
-# 1) ADD TX + RXs (clamped to building corridor)
-# ------------------------------------------------------------
-def clamp_to_bounds(pos, mins, maxs, margin=1.0):
-    x, y, z = pos
-    x = float(np.clip(x, mins[0] + margin, maxs[0] - margin))
-    y = float(np.clip(y, mins[1] + margin, maxs[1] - margin))
-    z = float(np.clip(z, mins[2] + margin, maxs[2] - margin))
-    return [x, y, z]
-
-# Tx roughly above the middle of the building range
-tx_x_center = 0.5 * (X_BUILD_MIN + X_BUILD_MAX)
-tx_pos = clamp_to_bounds([tx_x_center, 0.0, 10.0], mins, maxs)
-tx_pos = np.array(tx_pos, dtype=float)
+tx_pos = np.array([0.0, 0.0, 10.0])
 tx = Transmitter(name="Tx", position=tx_pos.tolist())
 scene.add(tx)
 
-# Receivers along the street, limited to building X-range
 num_rx = 15
-margin_x = 5.0
-start_x = X_BUILD_MIN + margin_x
-stop_x  = X_BUILD_MAX - margin_x
-y_rx = -20.0
-z_rx = 1.5
-
 rx_positions = np.linspace(
-    start=[start_x, y_rx, z_rx],
-    stop=[stop_x,  y_rx, z_rx],
+    start=[50.0, -20.0, 1.5],
+    stop=[350.0, -20.0, 1.5],
     num=num_rx
 )
 
 receivers = []
 for i, pos in enumerate(rx_positions):
-    pos_clamped = clamp_to_bounds(pos, mins, maxs)
-    rx = Receiver(name=f"Rx_{i}", position=pos_clamped)
+    rx = Receiver(name=f"Rx_{i}", position=pos.tolist())
     scene.add(rx)
     receivers.append(rx)
 
@@ -143,7 +80,8 @@ scene.tx_array = PlanarArray(
 )
 scene.rx_array = scene.tx_array
 
-# Optional 3D preview of scene + devices (no rays yet)
+# ---- 3D preview of scene + devices (no rays yet) ----
+# Requires sionna-vispy or compatible backend installed.
 scene.preview(show_devices=True)
 
 p_solver = PathSolver()
@@ -170,29 +108,35 @@ for f in frequencies:
     )
     results[f] = paths
 
-    # Interactive preview (if backend works)
+    # ---- Interactive 3D preview including rays ----
     scene.preview(
         paths=paths,
         show_devices=True,
     )
 
-    # Camera: top-down centered on Rx line
+    # ---- Optional: save static PNG for the report ----
     rx_mid = 0.5 * (rx_positions[0] + rx_positions[-1])
+    look_at = [
+        float(rx_mid[0]),
+        float(rx_mid[1]),
+        1.5  # street level
+    ]
     cam = Camera(
+        # Top‑down view, looking straight down at the middle of the street
         position=[float(rx_mid[0]), float(rx_mid[1]), 250.0],
         look_at=[float(rx_mid[0]), float(rx_mid[1]), 0.0],
     )
 
-    # Filter weak rays for clearer figure
-    paths_vis = filter_strong_paths(paths, threshold_db=-90.0)
+    # High‑quality render to file
+    paths_vis = filter_strong_paths(paths, threshold_db=-90)
 
     scene.render_to_file(
         camera=cam,
         filename=f"pankow_rays_{int(f / 1e9)}GHz.png",
-        paths=paths_vis,
+        paths=paths,  # or just paths
         show_devices=True,
         num_samples=256,
-        resolution=[1920, 1080],
+        resolution=[1920, 1080],  # 16:9 landscape
     )
 
 print("Ray tracing finished.")
@@ -201,10 +145,12 @@ print("Ray tracing finished.")
 # 3) PATH LOSS PER RECEIVER  (using CIR)
 # ------------------------------------------------------------
 def path_loss_per_rx(paths):
+    # a: [num_rx, 1, 1, 1, num_paths, 1] in your setup. [web:2]
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
-    power_rx = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5))
+    power_rx = np.sum(np.abs(a) ** 2, axis=(1, 2, 3, 4, 5))  # sum over all but rx
     pl_db = -10.0 * np.log10(power_rx + 1e-15)
-    return pl_db
+    return pl_db  # shape [num_rx]
+
 
 def plot_path_loss(freq, paths):
     pl_db = path_loss_per_rx(paths)
@@ -219,6 +165,7 @@ def plot_path_loss(freq, paths):
     plt.tight_layout()
     plt.show()
 
+
 for f in frequencies:
     plot_path_loss(f, results[f])
 
@@ -227,10 +174,13 @@ for f in frequencies:
 # ------------------------------------------------------------
 def pdp_for_rx(paths, rx_index=0):
     a, tau = paths.cir(normalize_delays=False, out_type="numpy")
+    # Shapes: a (15,1,1,1,64,1), tau (15,1,64)
     a_rx = a[rx_index, 0, 0, 0, :, 0]
     tau_rx = tau[rx_index, 0, :]
 
     p = np.abs(a_rx) ** 2
+
+    # Keep only valid paths: delay >= 0 and power > 0
     mask = (tau_rx >= 0.0) & (p > 0.0)
     tau_rx = tau_rx[mask]
     p = p[mask]
@@ -244,6 +194,7 @@ def rms_delay_spread(delays, powers):
     p_norm = p / (p.sum() + 1e-15)
     tau_mean = np.sum(tau * p_norm)
     return np.sqrt(np.sum(p_norm * (tau - tau_mean) ** 2))
+
 
 f_test = frequencies[0]
 paths_test = results[f_test]
